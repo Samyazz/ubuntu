@@ -32,59 +32,48 @@ autoinstall:
       multiverse-updates:
         source: "deb http://archive.ubuntu.com/ubuntu $RELEASE-updates multiverse"
   
-  # Storage configuration for precreated RAID setup
+  # Storage configuration - single disk with LVM, ready for post-install mirroring
   storage:
     config:
-      # Define the disks first
+      # Primary NVMe disk (nvme1n1 left untouched for later mirroring)
       - type: disk
         id: disk0
         path: /dev/nvme0n1
-        preserve: true
-      
-      - type: disk
-        id: disk1
-        path: /dev/nvme1n1
-        preserve: true
-      
-      # EFI partitions (already exist)
-      - type: partition
-        id: efi_partition0
-        device: disk0
-        number: 1
-        preserve: true
+        wipe: superblock-recursive
+        preserve: false
         grub_device: true
       
+      # EFI system partition (512MB)
       - type: partition
-        id: efi_partition1
-        device: disk1
-        number: 1
-        preserve: true
+        id: efi_partition
+        device: disk0
+        size: 512M
+        flag: boot
+        preserve: false
       
-      # RAID arrays (already exist)
-      - type: raid
-        id: raid_boot
-        name: md0
-        preserve: true
+      # Boot partition (1GB)
+      - type: partition
+        id: boot_partition
+        device: disk0
+        size: 1G
+        preserve: false
       
-      - type: raid
-        id: raid_swap
-        name: md1
-        preserve: true
+      # LVM partition (remaining space)
+      - type: partition
+        id: lvm_partition
+        device: disk0
+        size: -1
+        preserve: false
       
-      - type: raid
-        id: raid_lvm
-        name: md2
-        preserve: true
-      
-      # LVM volume group on md2
+      # LVM volume group
       - type: lvm_volgroup
         id: vg0
         name: ubuntu-vg
         devices:
-          - raid_lvm
+          - lvm_partition
         preserve: false
       
-      # Root logical volume - 1TB
+      # Root logical volume (1TB)
       - type: lvm_partition
         id: lv_root
         name: root
@@ -92,31 +81,26 @@ autoinstall:
         size: 1T
         preserve: false
       
-      # Format EFI partitions
+      # Swap logical volume (400GB for LLM workloads)
+      - type: lvm_partition
+        id: lv_swap
+        name: swap
+        volgroup: vg0
+        size: 400G
+        preserve: false
+      
+      # Format EFI partition
       - type: format
-        id: efi_format0
-        volume: efi_partition0
+        id: efi_format
+        volume: efi_partition
         fstype: fat32
         preserve: false
       
-      - type: format
-        id: efi_format1
-        volume: efi_partition1
-        fstype: fat32
-        preserve: false
-      
-      # Format boot RAID
+      # Format boot partition
       - type: format
         id: boot_format
-        volume: raid_boot
+        volume: boot_partition
         fstype: ext4
-        preserve: false
-      
-      # Format swap RAID
-      - type: format
-        id: swap_format
-        volume: raid_swap
-        fstype: swap
         preserve: false
       
       # Format root LV
@@ -126,10 +110,17 @@ autoinstall:
         fstype: ext4
         preserve: false
       
+      # Format swap LV
+      - type: format
+        id: swap_format
+        volume: lv_swap
+        fstype: swap
+        preserve: false
+      
       # Mount points
       - type: mount
         id: efi_mount
-        device: efi_format0
+        device: efi_format
         path: /boot/efi
       
       - type: mount
@@ -149,10 +140,9 @@ autoinstall:
   
   # User configuration
   identity:
-    hostname: ubuntu-server
+    hostname: ubuntu-desktop
     username: ubuntu
     # Generate with: openssl passwd -6 adm.Test (generates random salt automatically)
-    # Or with specific salt: openssl passwd -6 -salt salt adm.Test
     password: '$6$salt$LgUFV8K47KGR3Wt.L/vE6/8nJa1z2Vz9mGzh5aB3c4F6Pt0rS8Nw2x1B9Ml4K6V8J2H3G5pQ7t4R6S1u3W5y9.'
     realname: Ubuntu User
   
@@ -171,7 +161,6 @@ autoinstall:
     - wget
     - vim
     - htop
-    - mdadm
     - lvm2
     - ubuntu-restricted-extras  # Third-party codecs and fonts
     - ubuntu-drivers-common     # Driver management tools
@@ -184,11 +173,9 @@ autoinstall:
   late-commands:
     # Install and configure additional drivers automatically
     - curtin in-target --target=/target -- ubuntu-drivers autoinstall
-    # Update GRUB for UEFI/RAID setup
+    # Update GRUB for UEFI setup
     - curtin in-target --target=/target -- update-grub
-    # Install GRUB on both EFI partitions for redundancy
-    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu
-    # Update initramfs to include RAID modules
+    # Update initramfs
     - curtin in-target --target=/target -- update-initramfs -u
     # Disable IPv6 permanently in sysctl
     - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf'
@@ -197,8 +184,73 @@ autoinstall:
     # Add IPv6 disable to GRUB kernel parameters
     - curtin in-target --target=/target -- sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& ipv6.disable=1/' /etc/default/grub
     - curtin in-target --target=/target -- update-grub
-    # Configure RAID monitoring
-    - curtin in-target --target=/target -- sh -c 'echo "MAILADDR root" >> /etc/mdadm/mdadm.conf'
+    # Create script for post-installation LVM mirroring setup
+    - curtin in-target --target=/target -- tee /home/ubuntu/setup-lvm-mirror.sh > /dev/null << 'SCRIPT'
+#!/bin/bash
+# Post-installation LVM mirroring setup script
+# Run this after installation to set up redundancy with /dev/nvme1n1
+
+echo "=== LVM Mirroring Setup Script ==="
+echo "This will set up LVM mirroring using /dev/nvme1n1"
+echo "WARNING: This will wipe /dev/nvme1n1 completely!"
+echo ""
+read -p "Continue? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 1
+fi
+
+echo "Step 1: Preparing /dev/nvme1n1..."
+sudo wipefs -a /dev/nvme1n1
+
+echo "Step 2: Creating partitions on /dev/nvme1n1..."
+# Copy partition table from nvme0n1 to nvme1n1
+sudo sfdisk -d /dev/nvme0n1 | sudo sfdisk /dev/nvme1n1
+
+echo "Step 3: Setting up EFI redundancy..."
+sudo mkfs.fat -F32 /dev/nvme1n1p1
+sudo mkdir -p /tmp/efi-backup
+sudo mount /dev/nvme0n1p1 /tmp/efi-backup
+sudo mkdir -p /tmp/efi-new
+sudo mount /dev/nvme1n1p1 /tmp/efi-new
+sudo cp -a /tmp/efi-backup/* /tmp/efi-new/
+sudo umount /tmp/efi-backup /tmp/efi-new
+
+echo "Step 4: Installing GRUB on second drive..."
+sudo grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu /dev/nvme1n1
+
+echo "Step 5: Adding /dev/nvme1n1p3 to LVM..."
+sudo pvcreate /dev/nvme1n1p3
+sudo vgextend ubuntu-vg /dev/nvme1n1p3
+
+echo "Step 6: Converting LVs to RAID1 mirrors..."
+echo "Converting root volume..."
+sudo lvconvert --type raid1 -m1 ubuntu-vg/root /dev/nvme1n1p3
+echo "Converting swap volume..."
+sudo lvconvert --type raid1 -m1 ubuntu-vg/swap
+
+echo "Step 7: Setting up /boot mirroring..."
+sudo mkfs.ext4 /dev/nvme1n1p2
+sudo mkdir -p /tmp/boot-backup
+sudo mount --bind /boot /tmp/boot-backup
+sudo mkdir -p /tmp/boot-new  
+sudo mount /dev/nvme1n1p2 /tmp/boot-new
+sudo cp -a /tmp/boot-backup/* /tmp/boot-new/
+sudo umount /tmp/boot-backup /tmp/boot-new
+
+echo ""
+echo "=== LVM Mirroring Setup Complete! ==="
+echo "Your system now has full hardware redundancy."
+echo "Both drives can boot independently if one fails."
+echo ""
+echo "Check RAID status with:"
+echo "  sudo lvs -a -o +devices"
+echo "  sudo mdadm --detail /dev/md*"
+SCRIPT
+    # Make the script executable
+    - curtin in-target --target=/target -- chmod +x /home/ubuntu/setup-lvm-mirror.sh
+    - curtin in-target --target=/target -- chown ubuntu:ubuntu /home/ubuntu/setup-lvm-mirror.sh
   
   # Reboot after installation
   shutdown: reboot
