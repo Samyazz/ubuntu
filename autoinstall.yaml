@@ -15,9 +15,6 @@ autoinstall:
       eno1:
         dhcp4: true
         dhcp6: false
-        ipv6:
-          accept-ra: false
-          use-tempaddr: false
   
   # Kernel selection - 6.11 HWE kernel
   kernel:
@@ -170,12 +167,7 @@ autoinstall:
     - linux-firmware           # Additional firmware
   
   # Updates and upgrades
-  package_update: true
-  package_upgrade: true
-  
-  # Disable IPv6 system-wide
-  kernel_parameters:
-    - ipv6.disable=1
+  updates: security
   
   # Late commands for final configuration
   late-commands:
@@ -191,11 +183,11 @@ autoinstall:
     - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf'
     - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf'
     - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.lo.disable_ipv6 = 1" >> /etc/sysctl.conf'
+    # Add IPv6 disable to GRUB kernel parameters
+    - curtin in-target --target=/target -- sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& ipv6.disable=1/' /etc/default/grub
+    - curtin in-target --target=/target -- update-grub
     # Configure RAID monitoring
     - curtin in-target --target=/target -- sh -c 'echo "MAILADDR root" >> /etc/mdadm/mdadm.conf'
-    # Ensure latest HWE kernel is installed
-    - curtin in-target --target=/target -- apt update
-    - curtin in-target --target=/target -- apt install -y linux-generic-hwe-24.04
   
   # Reboot after installation
   shutdown: reboot
