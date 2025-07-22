@@ -166,7 +166,7 @@ autoinstall:
     - curtin in-target --target=/target -- sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& ipv6.disable=1/' /etc/default/grub
     - curtin in-target --target=/target -- update-grub
     # Create script for post-installation LVM mirroring setup
-    - curtin in-target --target=/target -- tee /home/ubuntu/setup-lvm-mirror.sh > /dev/null << 'SCRIPT'
+    - curtin in-target --target=/target -- sh -c 'cat > /home/ubuntu/setup-lvm-mirror.sh << "EOF"
 #!/bin/bash
 # Post-installation LVM mirroring setup script
 # Run this after installation to set up redundancy with /dev/nvme1n1
@@ -186,14 +186,17 @@ echo "Step 1: Preparing /dev/nvme1n1..."
 sudo wipefs -a /dev/nvme1n1
 
 echo "Step 2: Creating partitions on /dev/nvme1n1..."
-# Copy partition table from nvme0n1 to nvme1n1
-sudo sfdisk -d /dev/nvme0n1 | sudo sfdisk /dev/nvme1n1
+# Create EFI partition (512MB)
+sudo parted /dev/nvme1n1 --script mklabel gpt
+sudo parted /dev/nvme1n1 --script mkpart primary fat32 1MiB 513MiB
+sudo parted /dev/nvme1n1 --script set 1 esp on
+# Create LVM partition (rest of disk)
+sudo parted /dev/nvme1n1 --script mkpart primary 513MiB 100%
 
 echo "Step 3: Setting up EFI redundancy..."
 sudo mkfs.fat -F32 /dev/nvme1n1p1
-sudo mkdir -p /tmp/efi-backup
+sudo mkdir -p /tmp/efi-backup /tmp/efi-new
 sudo mount /dev/nvme0n1p1 /tmp/efi-backup
-sudo mkdir -p /tmp/efi-new
 sudo mount /dev/nvme1n1p1 /tmp/efi-new
 sudo cp -a /tmp/efi-backup/* /tmp/efi-new/
 sudo umount /tmp/efi-backup /tmp/efi-new
@@ -222,7 +225,7 @@ echo ""
 echo "Check RAID status with:"
 echo "  sudo lvs -a -o +devices"
 echo "  sudo pvs"
-SCRIPT
+EOF'
     # Make the script executable
     - curtin in-target --target=/target -- chmod +x /home/ubuntu/setup-lvm-mirror.sh
     - curtin in-target --target=/target -- chown ubuntu:ubuntu /home/ubuntu/setup-lvm-mirror.sh
