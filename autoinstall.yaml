@@ -1,0 +1,201 @@
+#cloud-config
+autoinstall:
+  version: 1
+  
+  # Locale and keyboard
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+    variant: ''
+  
+  # Network configuration - disable IPv6
+  network:
+    version: 2
+    ethernets:
+      eno1:
+        dhcp4: true
+        dhcp6: false
+        ipv6:
+          accept-ra: false
+          use-tempaddr: false
+  
+  # Kernel selection - 6.11 HWE kernel
+  kernel:
+    flavor: hwe
+  
+  # Enable third-party software and drivers
+  drivers:
+    install: true
+  
+  # Third-party software repositories
+  apt:
+    sources:
+      multiverse:
+        source: "deb http://archive.ubuntu.com/ubuntu $RELEASE multiverse"
+      multiverse-updates:
+        source: "deb http://archive.ubuntu.com/ubuntu $RELEASE-updates multiverse"
+  
+  # Storage configuration for precreated RAID setup
+  storage:
+    config:
+      # EFI partitions (already exist)
+      - type: partition
+        id: efi_partition0
+        device: nvme0n1
+        number: 1
+        preserve: true
+        grub_device: true
+      
+      - type: partition
+        id: efi_partition1
+        device: nvme1n1
+        number: 1
+        preserve: true
+      
+      # RAID arrays (already exist)
+      - type: raid
+        id: raid_boot
+        name: md0
+        preserve: true
+      
+      - type: raid
+        id: raid_swap
+        name: md1
+        preserve: true
+      
+      - type: raid
+        id: raid_lvm
+        name: md2
+        preserve: true
+      
+      # LVM volume group on md2
+      - type: lvm_volgroup
+        id: vg0
+        name: ubuntu-vg
+        devices:
+          - raid_lvm
+        preserve: false
+      
+      # Root logical volume - 1TB
+      - type: lvm_partition
+        id: lv_root
+        name: root
+        volgroup: vg0
+        size: 1T
+        preserve: false
+      
+      # Format EFI partitions
+      - type: format
+        id: efi_format0
+        volume: efi_partition0
+        fstype: fat32
+        preserve: false
+      
+      - type: format
+        id: efi_format1
+        volume: efi_partition1
+        fstype: fat32
+        preserve: false
+      
+      # Format boot RAID
+      - type: format
+        id: boot_format
+        volume: raid_boot
+        fstype: ext4
+        preserve: false
+      
+      # Format swap RAID
+      - type: format
+        id: swap_format
+        volume: raid_swap
+        fstype: swap
+        preserve: false
+      
+      # Format root LV
+      - type: format
+        id: root_format
+        volume: lv_root
+        fstype: ext4
+        preserve: false
+      
+      # Mount points
+      - type: mount
+        id: efi_mount
+        device: efi_format0
+        path: /boot/efi
+      
+      - type: mount
+        id: boot_mount
+        device: boot_format
+        path: /boot
+      
+      - type: mount
+        id: root_mount
+        device: root_format
+        path: /
+      
+      - type: mount
+        id: swap_mount
+        device: swap_format
+        path: none
+  
+  # User configuration
+  identity:
+    hostname: ubuntu-server
+    username: ubuntu
+    # Generate with: openssl passwd -6 adm.Test (generates random salt automatically)
+    # Or with specific salt: openssl passwd -6 -salt salt adm.Test
+    password: '$6$salt$LgUFV8K47KGR3Wt.L/vE6/8nJa1z2Vz9mGzh5aB3c4F6Pt0rS8Nw2x1B9Ml4K6V8J2H3G5pQ7t4R6S1u3W5y9.'
+    realname: Ubuntu User
+  
+  # SSH configuration
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys: []
+      # Add your SSH public keys here if needed
+      # - "ssh-rsa AAAAB3NzaC1yc2E... user@host"
+  
+  # Package selection including third-party software
+  packages:
+    - openssh-server
+    - curl
+    - wget
+    - vim
+    - htop
+    - mdadm
+    - lvm2
+    - ubuntu-restricted-extras  # Third-party codecs and fonts
+    - ubuntu-drivers-common     # Driver management tools
+    - linux-firmware           # Additional firmware
+  
+  # Updates and upgrades
+  package_update: true
+  package_upgrade: true
+  
+  # Disable IPv6 system-wide
+  kernel_parameters:
+    - ipv6.disable=1
+  
+  # Late commands for final configuration
+  late-commands:
+    # Install and configure additional drivers automatically
+    - curtin in-target --target=/target -- ubuntu-drivers autoinstall
+    # Update GRUB for UEFI/RAID setup
+    - curtin in-target --target=/target -- update-grub
+    # Install GRUB on both EFI partitions for redundancy
+    - curtin in-target --target=/target -- grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu
+    # Update initramfs to include RAID modules
+    - curtin in-target --target=/target -- update-initramfs -u
+    # Disable IPv6 permanently in sysctl
+    - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf'
+    - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.conf'
+    - curtin in-target --target=/target -- sh -c 'echo "net.ipv6.conf.lo.disable_ipv6 = 1" >> /etc/sysctl.conf'
+    # Configure RAID monitoring
+    - curtin in-target --target=/target -- sh -c 'echo "MAILADDR root" >> /etc/mdadm/mdadm.conf'
+    # Ensure latest HWE kernel is installed
+    - curtin in-target --target=/target -- apt update
+    - curtin in-target --target=/target -- apt install -y linux-generic-hwe-24.04
+  
+  # Reboot after installation
+  shutdown: reboot
