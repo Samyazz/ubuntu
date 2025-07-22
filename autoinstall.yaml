@@ -35,17 +35,28 @@ autoinstall:
   # Storage configuration for precreated RAID setup
   storage:
     config:
+      # Define the disks first
+      - type: disk
+        id: disk0
+        path: /dev/nvme0n1
+        preserve: true
+      
+      - type: disk
+        id: disk1
+        path: /dev/nvme1n1
+        preserve: true
+      
       # EFI partitions (already exist)
       - type: partition
         id: efi_partition0
-        device: nvme0n1
+        device: disk0
         number: 1
         preserve: true
         grub_device: true
       
       - type: partition
         id: efi_partition1
-        device: nvme1n1
+        device: disk1
         number: 1
         preserve: true
       
